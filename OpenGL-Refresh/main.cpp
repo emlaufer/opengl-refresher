@@ -4,12 +4,17 @@
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <vector>
 
 #include "glad/glad.h"
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 
 float vertices[] = {
     // front
@@ -58,6 +63,10 @@ unsigned int indices[] = {
 	3, 2, 6,
 	6, 7, 3
 };
+
+unsigned int dvao;
+unsigned int dibo;
+unsigned int dicount;
 
 using namespace std;
 
@@ -122,6 +131,54 @@ unsigned int init_shaders() {
   return shaderProgram;
 }
 
+void load_model() {
+  Assimp::Importer importer;
+  const aiScene* scene = importer.ReadFile("dragon.obj", aiProcess_Triangulate);
+
+  if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+    cout << "Error Assimp loading..." << endl;
+    return;
+  }
+
+  // for dragon, we have one node with one mesh
+  aiMesh* mesh = scene->mMeshes[scene->mRootNode->mChildren[0]->mMeshes[0]];
+
+  // we will put all data in single vbo object for ease
+  unsigned int vbo;
+  glGenBuffers(1, &vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+  // gross calculations can be refactored... basically just lays out data as {verticies, normals}
+  glBufferData(GL_ARRAY_BUFFER, sizeof(mesh->mVertices[0]) * mesh->mNumVertices + sizeof(mesh->mNormals[0]) * mesh->mNumVertices, nullptr, GL_STATIC_DRAW);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(mesh->mVertices[0]) * mesh->mNumVertices, mesh->mVertices);
+  glBufferSubData(GL_ARRAY_BUFFER, sizeof(mesh->mVertices[0]) * mesh->mNumVertices, sizeof(mesh->mNormals[0]) * mesh->mNumVertices, mesh->mNormals);
+
+  // configure the vao with vertex attributes
+  glGenVertexArrays(1, &dvao);
+  glBindVertexArray(dvao);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+  glEnableVertexAttribArray(0);
+  
+  // set attrib to start at offset after verticies
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)(sizeof(mesh->mVertices[0]) * mesh->mNumVertices));
+  glEnableVertexAttribArray(1);
+
+  // get indices out .... must do because they are in ptrs...
+  vector<unsigned int> inds;
+  for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
+    for (unsigned int j = 0; j < 3; j++) {
+      inds.push_back(mesh->mFaces[i].mIndices[j]);
+    }
+  }
+
+  glGenBuffers(1, &dibo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, dibo);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, inds.size() * sizeof(unsigned int), inds.data(), GL_STATIC_DRAW);
+  dicount = inds.size();
+
+  return;
+}
+
 int main() {
   // initialize glfw
   glfwInit();
@@ -150,6 +207,8 @@ int main() {
   // ensure we cull the back face to prevent wacky artifacts
   glEnable(GL_CULL_FACE);
   glCullFace(GL_BACK);
+
+  glEnable(GL_DEPTH_TEST);
   
   // tell opengl our screen coordinate ranges
   glViewport(0, 0, 800, 600);
@@ -158,6 +217,8 @@ int main() {
   glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
   unsigned int shaderProgram = init_shaders();
+
+  load_model();
 
   // create vertex array object
   unsigned int vao;
@@ -197,18 +258,22 @@ int main() {
   float degrees = 0.0f;
   float deg2 = 0.0f;
   while (!glfwWindowShouldClose(window)) {
-    glClearColor(0.2f, 0.4, 0.4f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClearColor(0.2f, 0.4f, 0.4f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(shaderProgram);
-    glBindVertexArray(vao);
+    glBindVertexArray(dvao);
 
-    glm::mat4 rot1 = glm::rotate(glm::mat4(1.0f), glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
-    glm::mat4 model = glm::rotate(rot1, glm::radians(deg2), glm::vec3(1.0f, 0.0f, 0.0f));
+    glm::mat4 trans = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -5.0f, -10.f));
+    glm::mat4 model = glm::rotate(trans, glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 ortho = glm::ortho(-10.0f, 10.0f, -10.f, 10.0f, 0.1f, 100.0f);
+    glm::mat4 mvp = model * ortho;
+    // glm::mat4 model = glm::rotate(rot1, glm::radians(deg2), glm::vec3(1.0f, 0.0f, 0.0f));
     glUniformMatrix4fv(0, 1, GL_FALSE, glm::value_ptr(model));
+    glUniformMatrix4fv(1, 1, GL_FALSE, glm::value_ptr(ortho));
 
-    //glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-    glDrawElements(GL_TRIANGLES, sizeof(indices) / sizeof(unsigned int), GL_UNSIGNED_INT, nullptr);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, dibo);
+    glDrawElements(GL_TRIANGLES, dicount, GL_UNSIGNED_INT, nullptr);
     //glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // poll for input
@@ -216,8 +281,8 @@ int main() {
     // swap the framebuffers...
     glfwSwapBuffers(window);
 
-    degrees += 0.1f;
-    deg2 += 0.2;
+    degrees += 0.05f;
+    deg2 += 0.2f;
   }
 
   glfwTerminate();
